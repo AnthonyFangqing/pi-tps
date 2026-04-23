@@ -135,10 +135,10 @@ function calculateStats(event: AgentEndEvent, timing: TurnTiming): string | null
   const generationSeconds = timing.totalGenerationMs / 1000;
   const tps = output / generationSeconds;
 
-  const ttftFormatted = formatDuration(ttftMs / 1000);
-  const totalFormatted = formatDuration(totalMs / 1000);
+  const ttftFormatted = `${(ttftMs / 1000).toFixed(2)}s`;
+  const totalFormatted = `${(totalMs / 1000).toFixed(2)}s`;
 
-  return `TPS ${tps.toFixed(1)} tok/s · TTFT ${ttftFormatted} · ${totalFormatted} · out ${formatNumber(output)} · in ${formatNumber(input)}`;
+  return `TPS ${tps.toFixed(2)} tok/s · TTFT ${ttftFormatted} · ${totalFormatted} · out ${formatNumber(output)} · in ${formatNumber(input)}`;
 }
 
 export default function tpsExtension(pi: ExtensionAPI) {
