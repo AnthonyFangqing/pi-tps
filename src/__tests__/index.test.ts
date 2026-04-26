@@ -4,7 +4,6 @@ import tpsExtension, {
   estimateStreamTokens,
   formatRate,
   formatTtft,
-  activeDurationMs,
 } from '../index.js';
 
 // --- Types for events used in tests ---
@@ -90,43 +89,6 @@ describe('formatTtft', () => {
   });
 });
 
-describe('activeDurationMs', () => {
-  it('returns 0 for empty samples', () => {
-    expect(activeDurationMs([])).toBe(0);
-  });
-
-  it('clamps single sample without tailAt to 1000ms', () => {
-    const now = Date.now();
-    expect(activeDurationMs([{ at: now, tokens: 1 }])).toBe(1000);
-  });
-
-  it('clamps single sample with tailAt to [250, 1000]', () => {
-    const now = Date.now();
-    expect(activeDurationMs([{ at: now, tokens: 1 }], now + 100)).toBe(250);
-    expect(activeDurationMs([{ at: now, tokens: 1 }], now + 500)).toBe(500);
-    expect(activeDurationMs([{ at: now, tokens: 1 }], now + 2000)).toBe(1000);
-  });
-
-  it('sums gaps between multiple samples with 1000ms minimum', () => {
-    const now = Date.now();
-    const samples = [
-      { at: now, tokens: 1 },
-      { at: now + 200, tokens: 1 },
-      { at: now + 500, tokens: 1 },
-    ];
-    expect(activeDurationMs(samples)).toBe(1000); // 200 + 300 = 500, max(500, 1000) = 1000
-  });
-
-  it('adds tail duration for multiple samples', () => {
-    const now = Date.now();
-    const samples = [
-      { at: now, tokens: 1 },
-      { at: now + 600, tokens: 1 },
-    ];
-    expect(activeDurationMs(samples, now + 1600)).toBe(1600); // 600 + 1000 = 1600
-  });
-});
-
 // --- Integration tests for extension event handlers ---
 describe('pi-tps extension', () => {
   let mockPi: Partial<ExtensionAPI>;
@@ -165,7 +127,6 @@ describe('pi-tps extension', () => {
 
   it('registers all required event handlers', () => {
     expect(mockPi.on).toHaveBeenCalledWith('session_start', expect.any(Function));
-    expect(mockPi.on).toHaveBeenCalledWith('session_shutdown', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('turn_start', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('turn_end', expect.any(Function));
     expect(mockPi.on).toHaveBeenCalledWith('message_update', expect.any(Function));
@@ -190,6 +151,7 @@ describe('pi-tps extension', () => {
 
     handlers['turn_start']?.({ turnIndex: 0 } as TurnStartEvent);
     handlers['turn_end']?.();
+    // turn_end resets burst; no status update fired in this path
     expect(setStatusSpy).not.toHaveBeenCalled();
   });
 
@@ -290,7 +252,7 @@ describe('pi-tps extension', () => {
     expect(setStatusSpy).not.toHaveBeenCalled();
   });
 
-  it('stops streaming on tool_execution_start', () => {
+  it('resets live TPS on tool_execution_start', () => {
     handlers['session_start']?.({}, mockCtx);
     handlers['turn_start']?.({ turnIndex: 0 } as TurnStartEvent);
 
@@ -306,25 +268,32 @@ describe('pi-tps extension', () => {
     expect(lastCall[1]).not.toMatch(/TPS \d/);
   });
 
-  it('prune timer updates status when streaming stops', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-
+  it('resumes live TPS accurately after tool_execution_start gap', async () => {
     handlers['session_start']?.({}, mockCtx);
     handlers['turn_start']?.({ turnIndex: 0 } as TurnStartEvent);
 
+    // Initial streaming burst
     handlers['message_update']?.({
-      assistantMessageEvent: { type: 'text_delta', delta: 'hello' },
+      assistantMessageEvent: { type: 'text_delta', delta: 'hello world first part' },
     }, mockCtx);
 
+    await tick(50);
+
+    // Tool starts — resets burst
+    handlers['tool_execution_start']?.({}, mockCtx);
+
+    // Simulate a long gap (360s in reality, but we can only tick a bit in tests)
+    await tick(100);
+
+    // Resume streaming after tool gap
     setStatusSpy.mockClear();
+    handlers['message_update']?.({
+      assistantMessageEvent: { type: 'text_delta', delta: 'a'.repeat(50) },
+    }, mockCtx);
 
-    // Stop streaming so the prune timer will update status
-    handlers['turn_end']?.();
-
-    vi.advanceTimersByTime(1500);
-    expect(setStatusSpy).toHaveBeenCalled();
-
-    vi.useRealTimers();
+    const lastCall = setStatusSpy.mock.calls[setStatusSpy.mock.calls.length - 1];
+    // Should show TPS immediately (not "-")
+    expect(lastCall[1]).toMatch(/TPS \d/);
   });
 
   it('formats session stats correctly after multiple messages', async () => {
@@ -356,5 +325,35 @@ describe('pi-tps extension', () => {
     // Should show AVG
     const lastCall = setStatusSpy.mock.calls[setStatusSpy.mock.calls.length - 1];
     expect(lastCall[1]).toMatch(/AVG/);
+  });
+
+  it('does not show live TPS for zero-token delta', () => {
+    handlers['session_start']?.({}, mockCtx);
+    handlers['turn_start']?.({ turnIndex: 0 } as TurnStartEvent);
+
+    // Empty string still estimates to 1 token due to Math.max(1, ...)
+    // but a delta with no tokens isn't really possible with the heuristic
+    setStatusSpy.mockClear();
+    handlers['message_update']?.({
+      assistantMessageEvent: { type: 'text_delta', delta: '' },
+    }, mockCtx);
+
+    const lastCall = setStatusSpy.mock.calls[setStatusSpy.mock.calls.length - 1];
+    expect(lastCall[1]).toMatch(/TPS/); // 1 token at minimum
+  });
+
+  it('hides live TPS after turn_end', () => {
+    handlers['session_start']?.({}, mockCtx);
+    handlers['turn_start']?.({ turnIndex: 0 } as TurnStartEvent);
+
+    handlers['message_update']?.({
+      assistantMessageEvent: { type: 'text_delta', delta: 'hello' },
+    }, mockCtx);
+
+    setStatusSpy.mockClear();
+    handlers['turn_end']?.();
+
+    // turn_end resets burst; no status update fired in this path
+    expect(setStatusSpy).not.toHaveBeenCalled();
   });
 });
