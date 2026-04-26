@@ -11,13 +11,13 @@
  *   pi -e /path/to/pi-tps
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type StreamSample = {
+export type StreamSample = {
 	at: number;
 	tokens: number;
 };
@@ -43,6 +43,32 @@ type TrackerState = {
 	sessionAverage: SessionAverage;
 };
 
+// Local event shapes (not exported by pi-coding-agent)
+interface SessionStartEvent {
+	reason?: string;
+}
+
+interface TurnStartEvent {
+	turnIndex: number;
+}
+
+interface MessageUpdateEvent {
+	assistantMessageEvent?: {
+		type: string;
+		delta: string;
+	} | null;
+}
+
+interface MessageEndEvent {
+	message: {
+		role: string;
+		usage?: {
+			output?: number;
+			reasoning?: number;
+		};
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -57,23 +83,23 @@ const PRUNE_INTERVAL_MS = 1_000;
 // ---------------------------------------------------------------------------
 
 /** Rough token estimate from a text delta (same heuristic as oc-tps). */
-function estimateStreamTokens(delta: string): number {
+export function estimateStreamTokens(delta: string): number {
 	return Math.max(1, Math.ceil(Buffer.byteLength(delta, "utf8") / 5));
 }
 
-function formatRate(value: number, label: "TPS" | "AVG"): string | undefined {
+export function formatRate(value: number, label: "TPS" | "AVG"): string | undefined {
 	if (!Number.isFinite(value) || value <= 0) return undefined;
 	if (value >= 100) return `${Math.round(value)}${label === "TPS" ? " TPS" : ""}`;
 	if (value >= 10) return `${value.toFixed(1)}${label === "TPS" ? " TPS" : ""}`;
 	return `${value.toFixed(2)}${label === "TPS" ? " TPS" : ""}`;
 }
 
-function formatTtft(value: number): string | undefined {
+export function formatTtft(value: number): string | undefined {
 	if (!Number.isFinite(value) || value < 0) return undefined;
 	return `${value.toFixed(1)}s`;
 }
 
-function activeDurationMs(samples: StreamSample[], tailAt?: number): number {
+export function activeDurationMs(samples: StreamSample[], tailAt?: number): number {
 	if (samples.length === 0) return 0;
 	if (samples.length === 1) {
 		const tailDuration = tailAt ? Math.max(0, tailAt - samples[0].at) : SINGLE_SAMPLE_MS;
@@ -170,7 +196,7 @@ export default function (pi: ExtensionAPI) {
 
 	// -- Events ---------------------------------------------------------------
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (_event: SessionStartEvent, ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
 
 		// Reset state
@@ -200,7 +226,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// Track turn index and mark start of LLM call
-	pi.on("turn_start", async (event) => {
+	pi.on("turn_start", async (event: TurnStartEvent) => {
 		currentTurnIndex = event.turnIndex;
 		tracker.messageTimingByTurn[event.turnIndex] = {
 			requestStartAt: Date.now(),
@@ -213,7 +239,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// Track streaming deltas for live TPS
-	pi.on("message_update", async (event, ctx) => {
+	pi.on("message_update", async (event: MessageUpdateEvent, ctx: ExtensionContext) => {
 		const e = event.assistantMessageEvent;
 		if (!e) return;
 
@@ -252,7 +278,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// When a message ends, accumulate session averages
-	pi.on("message_end", async (event, ctx) => {
+	pi.on("message_end", async (event: MessageEndEvent, ctx: ExtensionContext) => {
 		const msg = event.message;
 		if (msg.role !== "assistant") return;
 
@@ -305,7 +331,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// When a tool starts, clear live TPS (tools interrupt the stream)
-	pi.on("tool_execution_start", async (_event, ctx) => {
+	pi.on("tool_execution_start", async (_event: unknown, ctx: ExtensionContext) => {
 		isStreaming = false;
 		// Record last tool call time
 		if (currentTurnIndex !== undefined) {
